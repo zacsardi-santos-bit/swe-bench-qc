@@ -1,11 +1,11 @@
 ---
 name: swe-bench-ext-qc
-description: Purely LLM-based QC (and fix) of a single SWE-Bench-Ext task. Use to quality-check ANY task (regardless of GP-validation pass/fail) with an LLM-judge rubric — issue meaning, difficulty, whether the golden patch resolves the issue, whether the tests evaluate resolution + functional effectiveness (which test file tests what), and whether the tests are too narrow / would false-negative a different-but-valid implementation. Decides whether a defect is a FIXABLE task-construction/environment issue (toolchain too old, missing deps, broken external download, BusyBox `timeout -k`, test-harness wiring, etc.) and fixes it in-place, or a genuine UPSTREAM PR issue (golden doesn't resolve, tests too narrow) which is flagged not fixed. Appends every finding to one shared QC report. Trigger when asked to QC / review / fix SWE-Bench-Ext (ots-sku-swe-bench-extended) tasks. All judgment is LLM-based reasoning — the deterministic GP-validation (empty=0.0/golden=1.0) is a SEPARATE check run elsewhere and is intentionally NOT part of this skill.
+description: Purely LLM-based QC of a single SWE-Bench-Ext task. Use to quality-check ANY task (regardless of GP-validation pass/fail) with an LLM-judge rubric — issue meaning, difficulty, whether the golden patch resolves the issue, whether the tests evaluate resolution + functional effectiveness (which test file tests what), and whether the tests are too narrow / would false-negative a different-but-valid implementation. Appends every finding to one shared QC report. Trigger when asked to QC / review SWE-Bench-Ext (ots-sku-swe-bench-extended) tasks. All judgment is LLM-based reasoning — the deterministic GP-validation (empty=0.0/golden=1.0) is a SEPARATE check run elsewhere and is intentionally NOT part of this skill.
 ---
 
-# SWE-Bench-Ext task QC + fix (LLM-only)
+# SWE-Bench-Ext task QC (LLM-only)
 
-QC one task with LLM reasoning over its issue/patch/tests, and fix it if the defect is in our task construction (not the upstream PR). Run on every task regardless of whether it passes GP validation — GP validation is a separate deterministic gate and is NOT performed here. 
+QC one task with LLM reasoning over its issue/patch/test. Run on every task regardless of whether it passes GP validation — GP validation is a separate deterministic gate and is NOT performed here. 
 
 ## The canonical checklist (the single source of truth for L2 LLM checks)
 
@@ -80,10 +80,7 @@ Run **Appendix A** (core: difficulty / golden-resolves / tests-evaluate / too-na
 
 One verdict per task. Severity order when several genuinely apply (each with quoted evidence): REWARD_HACKABLE/leakage ≥ UPSTREAM_PR_ISSUE ≥ FIXABLE > UNFAIR ≈ FORMAT_BRITTLE > PASS_CLEAN. Absent quotable evidence for a flag, the task is PASS_CLEAN.
 
-### 3. Fix (only if FIXABLE)
-Edit ONLY this task's files (usually `Dockerfile`; sometimes `run_test.sh`/`test_metadata.json` wiring), applying the minimal change matching the existing mechanism (Appendix B). Do not modify the golden or weaken tests. Confirmation that the fix restores empty=0.0/golden=1.0 is handled by the SEPARATE deterministic GP re-validation run (outside this skill) — note in the fragment that a re-validation is needed.
-
-### 4. Record (single shared report)
+### 3. Record (single shared report)
 Write a per-task fragment (parallel-safe) at:
 `/home/ubuntu/ots-sku-swe-bench-extended/qc_report.d/<TASK_ID>.md`
 Include: task_id; classification (PASS_CLEAN | FIXABLE-<subtype> | UPSTREAM_PR_ISSUE); the six judge outputs (condensed but specific — name which test file tests what, and the false-negative analysis); the exact fix diff (if any); and a one-line verdict. Fragments merge later into one `QC_REPORT.md`.
