@@ -1,0 +1,7 @@
+diff --git a/tests/test_x.py b/tests/test_x.py
+--- a/tests/test_x.py
++++ b/tests/test_x.py
+@@ -1 +1 @@
++def test_version():
++    import mypkg
++    assert mypkg.__version__ == "2.4.1"

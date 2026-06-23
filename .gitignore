@@ -1,0 +1,41 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────────────
+.env
+*.env
+*.key
+.mercor/
+rls-sk-*
+
+# ── Personal / system data that ended up in this folder (must not ship) ────
+Library/
+.claude/
+.cursor/
+.docker/
+.config/
+.local/
+.copilot/
+.vscode-shared/
+.zsh_history
+.zshrc
+.CFUserTextEncoding
+
+# ── Eval DATA + run artifacts (not the deliverable; huge; client-confidential)
+# Ignore everything under eval/ EXCEPT the synthetic regression floor + its labels.
+eval/*
+!eval/fixtures/
+!eval/labels.csv
+trajs/
+context/
+qc_out/
+qc_report*/
+disc_out/
+audit_out/
+build_check.sh
+
+# ── macOS / Python junk ───────────────────────────────────────────────────
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.tmp

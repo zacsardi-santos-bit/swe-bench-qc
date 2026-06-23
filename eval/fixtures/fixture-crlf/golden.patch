@@ -1,0 +1,5 @@
+diff --git a/src/x.py b/src/x.py
+--- a/src/x.py
++++ b/src/x.py
+@@ -1 +1 @@
++    kern = 0

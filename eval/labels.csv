@@ -1,0 +1,7 @@
+task,is_defect,notes
+fixture-clean,0,clean reference — must not be flagged (precision)
+fixture-crlf,1,CRLF in run_test.sh
+fixture-leak,1,Dockerfile COPYs golden.patch into image (answer leak)
+fixture-missing-meta,1,empty test_metadata.json (sandbox blocked delete)
+fixture-empty-f2p,1,FAIL_TO_PASS empty
+fixture-phantom,1,phantom test asserts "2.4.1" (absent from all agent-visible files) — semantic-only catch
