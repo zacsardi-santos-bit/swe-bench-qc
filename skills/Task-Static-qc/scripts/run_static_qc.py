@@ -33,15 +33,17 @@ CHECK_AREA = {
     "metadata-json": "metadata", "metadata-key": "metadata",
     "fail-to-pass": "metadata", "test-command": "metadata",
     "base-commit": "metadata", "test-files-count": "metadata",
+    "test-framework-mismatch": "metadata",
     # environment / dockerfile hygiene
     "crlf-line-endings": "dockerfile", "dep-unpinned": "dockerfile",
     "verify-time-fetch": "dockerfile", "service-not-started": "dockerfile",
-    "dockerfile-base-commit": "dockerfile",
+    "dockerfile-base-commit": "dockerfile", "pipeline-tag-comment": "dockerfile",
     # leakage / mounts
     "answer-leak": "anti_cheat", "contract-not-mounted": "anti_cheat",
     # verifier cross-consistency
     "golden-touches-tests": "tests", "test-patch-no-tests": "tests",
     "f2p-not-in-test-files": "tests", "runtest-vs-command": "dockerfile",
+    "anonymized-test-names": "tests", "testfile-untracked-in-metadata": "tests",
 }
 SEV = {"ERROR": FAIL, "WARN": WARN}
 

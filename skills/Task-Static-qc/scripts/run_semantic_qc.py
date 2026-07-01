@@ -62,6 +62,10 @@ finding per issue, plus a PASS `<area>-ok` per clean area:
    - brittle-string-match (FAIL): asserts HOW code is written not WHAT it produces;
      litmus = can you write a correct solution this test wrongly fails?
    - weak-assertion (WARN->FAIL): so permissive a wrong/no-op solution passes.
+   - contradictory-spec (FAIL): a behaviour an agent-visible spec/comment/schema/regex
+     DOCUMENTS conflicts with what a test asserts, so a careful agent following the
+     documented rule fails (RW Evals #24, T4188). Quote both the spec line and the
+     assertion. Distinct from phantom (value absent) — here both exist but disagree.
 2. Coverage: every requirement tested; flag a stated perf/behaviour bound no test exercises.
 3. Hygiene: spelling/grammar (WARN); ambiguity that changes what's built (FAIL); over-specified
    instruction that hands over the solution (over-specified-instruction).
@@ -79,7 +83,12 @@ MANDATORY before concluding:
 
 Apply the false-positive rules: discoverable values aren't phantom; an anti-shortcut grep alongside
 an outcome test is PASS; instruction-referenced inputs aren't leaks; deterministic baked ground truth
-is fine; map each test to a requirement before calling coverage minimal.
+is fine; map each test to a requirement before calling coverage minimal. PR-INHERENT IS NOT A DEFECT
+(Alibaba Concern 3/4): bundled monorepo artifacts in golden.patch (lock files, CHANGELOG, docs, CI
+configs, version bumps) and orthogonal hunks from an over-scoped upstream PR are the faithful contents
+of the real merged commit — emit a WARN `qc-note-pr-inherent`, NEVER golden-patch-mismatch; likewise a
+requirement left untested because the upstream PR never tested it is a `qc-note-coverage-gap` WARN, not
+a failed task. Only call golden-patch-mismatch when the golden genuinely does NOT implement the issue.
 
 {STATIC_BLOCK}
 

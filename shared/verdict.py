@@ -45,6 +45,9 @@ COSMETIC_TITLES = {
     "dockerfile-base-commit", "metadata-key", "test-files-count", "runtest-vs-command",
     "golden-touches-tests", "test-patch-no-tests", "f2p-not-in-test-files",
     "spelling-grammar", "service-not-started",
+    # Alibaba Concern 3/4: PR-inherent provenance (bundled monorepo artifacts,
+    # over-scoped upstream PR, upstream coverage gap) — annotate, don't fail the task.
+    "qc-note-pr-inherent", "qc-note-coverage-gap",
     # Behavioral build-INCONCLUSIVE (not a defect — task was never actually tested):
     # timeout, off-arch build, or unpullable base image. Kept out of the defect count.
     # (NOTE: these mean "untested here", not "verified clean" — confirm on delivery infra.)

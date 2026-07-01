@@ -22,6 +22,16 @@ from swe-bench-ext-client-feedback.md:
   - mount lint: interface.md / requirements.json present but not COPY'd in (RW Evals #7)
   - dependency hygiene: `@latest`, or install/fetch at verify time in run_test.sh (MAI drift)
   - service init: `systemctl enable` with nothing that starts it (RW Evals #25)
+  - untracked test files: a NEW test file added in test.patch that no FAIL_TO_PASS/
+    PASS_TO_PASS entry references — it runs but never counts, so a no-op can break it and
+    still score 1.0 (Alibaba Concern 2: apollographql-federation-278 golden=1.0 with 6/151
+    failing in the untracked file)
+It also runs delivery-hygiene checks (metadata fidelity / packaging readability) derived
+from client feedback on fingerprintjs / atdatabases / ibm-fhir:
+  - test_framework value vs test_command / language (e.g. "pytest" on a karma/TS task)
+  - leftover automation/pipeline tags in shipped files (e.g. `# MAI-10K-OTS`, `FIX2`)
+  - anonymized FAIL_TO_PASS names (`test_1` … `test_N`) untraceable to requirements
+These are WARN (the task still builds/passes/doesn't leak) and FAIL only under --strict.
 It does NOT cover the oracle/no-op gate (running golden=1.0 / no-op=0.0) — that requires
 executing the container and is a separate layer.
 
@@ -111,6 +121,76 @@ LEAK_FILE_HINT = re.compile(
 CONTRACT_FILES = ("interface.md", "requirements.json")
 # Shell/build files whose CRLF line endings break execution in the container.
 EXEC_FILES = ("run_test.sh", "solve.sh", "test.sh", "Dockerfile")
+
+# Test framework -> (command-line signature tokens, language family). Used to flag
+# a declared test_framework that contradicts how tests actually run or the task's
+# language (client defect: test_framework="pytest" on a karma/TypeScript task).
+FRAMEWORK_SIGNATURES = {
+    "pytest":   (("pytest", "py.test"), "python"),
+    "unittest": (("unittest",), "python"),
+    "nose":     (("nosetests", "nose"), "python"),
+    "jest":     (("jest",), "js"),
+    "vitest":   (("vitest",), "js"),
+    "mocha":    (("mocha",), "js"),
+    "jasmine":  (("jasmine",), "js"),
+    "karma":    (("karma",), "js"),
+    "ava":      (("ava",), "js"),
+    "maven":    (("mvn", "maven"), "java"),
+    "gradle":   (("gradle",), "java"),
+    "junit":    (("mvn", "gradle", "junit"), "java"),
+    "go":       (("go test", "gotest"), "go"),
+    "cargo":    (("cargo test", "cargo"), "rust"),
+    "rspec":    (("rspec",), "ruby"),
+    "minitest": (("minitest", "rake test"), "ruby"),
+    "phpunit":  (("phpunit",), "php"),
+    "ctest":    (("ctest",), "cpp"),
+    "dotnet":   (("dotnet test", "dotnet"), "dotnet"),
+}
+# `language` value (as written in test_metadata.json) -> the family bucket above.
+LANGUAGE_FAMILY = {
+    "python": "python",
+    "javascript": "js", "typescript": "js", "node": "js", "js": "js", "ts": "js",
+    "java": "java", "kotlin": "java", "scala": "java",
+    "go": "go", "golang": "go",
+    "rust": "rust",
+    "ruby": "ruby",
+    "php": "php",
+    "c++": "cpp", "cpp": "cpp", "c": "cpp",
+    "c#": "dotnet", "csharp": "dotnet", ".net": "dotnet",
+}
+
+# Internal automation/pipeline identifiers that must be stripped before delivery.
+# A client flagged leftover `# MAI-10K-OTS` / `# MAI-V5-FIX:FIX2` Dockerfile comments
+# as automation residue (and a sign the image may not have been manually verified).
+# Extend the alternation as new internal markers surface.
+PIPELINE_TAG_RE = re.compile(r"\bMAI-[0-9A-Z][0-9A-Z\-]*|\bFIX\d+\b", re.IGNORECASE)
+# Build/exec files (shipped to the client) we lint for stray pipeline tags.
+TAG_SCAN_FILES = ("Dockerfile", "run_test.sh", "solve.sh", "test.sh")
+
+# Anonymized / non-descriptive test identifiers (e.g. "test_1", "test_42") that
+# cannot be traced back to a real test method or to requirements.json.
+ANON_TEST_RE = re.compile(r"^test_\d+$", re.IGNORECASE)
+
+# Frameworks whose runners emit ONLY a count summary ("Tests run: 594, Failures: 0"),
+# not per-test names — so the parser legitimately SYNTHESIZES `test_1`…`test_N`.
+# Alibaba confirmed these are NOT a defect (the same parser runs both the metadata-
+# creation and the eval, so the synthetic ids match deterministically and grade
+# correctly). Suppress the anonymized-name WARN for these; KEEP it for frameworks that
+# do emit real per-test names (pytest, go test, jest, …) where `test_N` means a real
+# name was discarded (the ibm-fhir readability defect).
+COUNT_SUMMARY_FRAMEWORKS = {"maven", "gradle", "junit", "surefire", "ant", "mocha", "bun"}
+
+# An added (`+`-prefixed) line in a test.patch that DEFINES a test — used to tell a real
+# new test file from a fixture/helper/__init__ file (which shouldn't be in FAIL_TO_PASS).
+ADDED_TEST_DEF_RE = re.compile(
+    r"^\+\s*(?:"
+    r"def\s+test\w*\s*\(|"                          # python / pytest
+    r"func\s+(?:Test|Benchmark|Example)\w*\s*\(|"   # go
+    r"(?:it|test|describe)\s*\(|"                    # js / ts (jest / mocha / vitest)
+    r"@Test\b|"                                      # junit
+    r"#\[test\]|"                                    # rust
+    r"class\s+\w*Test\w*\b"                          # java / phpunit test class
+    r")", re.IGNORECASE | re.MULTILINE)
 
 
 @dataclass
@@ -338,6 +418,98 @@ def check_cross_consistency(task_dir: Path, meta: dict[str, Any] | None, r: Task
 
 
 # --------------------------------------------------------------------------- #
+# Untracked-test-file check (Alibaba Concern 2).
+# --------------------------------------------------------------------------- #
+
+def _added_test_files(testpatch: str) -> list[tuple[str, set[str]]]:
+    """New test files a test.patch ADDS (not edits to an existing test file), with the
+    test identifiers each one defines.
+
+    A new file is signalled by `new file mode` / `--- /dev/null` in its diff block.
+    Only files that look like tests AND add >=1 test definition count — so fixtures,
+    helpers, and `__init__.py` don't false-positive. Returns [(path, {names})].
+    """
+    out: list[tuple[str, set[str]]] = []
+    for blk in re.split(r"(?m)^diff --git ", testpatch):
+        if not blk.strip():
+            continue
+        m = re.search(r"^\+\+\+ b/(.+)$", blk, re.MULTILINE)
+        if not m:
+            continue
+        path = m.group(1).strip()
+        if path == "/dev/null" or not TESTFILE_HINT.search(path):
+            continue
+        if "new file mode" not in blk and "--- /dev/null" not in blk:
+            continue  # an edit to an existing (already-graded) test file, not a new one
+        added = "\n".join(l for l in blk.splitlines() if l.startswith("+"))
+        if not ADDED_TEST_DEF_RE.search(added):
+            continue  # new file but no test definitions -> helper/fixture, not graded
+        names: set[str] = set()
+        for mm in re.finditer(r"(?:def|func|fn)\s+(\w+)", added):
+            names.add(mm.group(1))
+        for mm in re.finditer(r"\b(?:it|test|describe)\s*\(\s*[\"'`]([^\"'`]+)", added):
+            names.add(mm.group(1).strip())
+        out.append((path, names))
+    return out
+
+
+def check_untracked_test_files(task_dir: Path, meta: dict[str, Any] | None,
+                               r: TaskReport) -> None:
+    """A NEW test file added in test.patch that NO FAIL_TO_PASS / PASS_TO_PASS entry
+    references runs during eval but its result never counts — a no-op or wrong solution
+    can break it and still score 1.0 (a silent false positive).
+
+    Alibaba Concern 2 (6 tasks): on `apollographql-federation-278` the golden run had
+    6/151 tests fail, all in the untracked file, yet the harness reported golden=1.0.
+    Deterministic and high-value; the consolidated feedback taxonomy attributes this to
+    L1. Fix is metadata-only: append the file's test identifiers to FAIL_TO_PASS.
+    """
+    if meta is None:
+        return
+    testpatch = _read_text(task_dir / "test.patch")
+    if not testpatch:
+        return
+    added = _added_test_files(testpatch)
+    if not added:
+        return
+    graded: list[str] = []
+    for key in ("FAIL_TO_PASS", "PASS_TO_PASS"):
+        v = meta.get(key)
+        if isinstance(v, list):
+            graded.extend(str(x) for x in v)
+    if not graded:
+        return  # empty FAIL_TO_PASS is its own (separate) error — don't double-report
+    blob = "\n".join(graded)
+    untracked = []
+    for path, names in added:
+        base = path.rsplit("/", 1)[-1]
+        noext = base.rsplit(".", 1)[0]
+        # Tracked if the file path, basename, ext-less basename, OR any test name it
+        # defines appears anywhere in the graded keys (generous match -> high precision).
+        toks = {path, base, noext} | names
+        if not any(t and t in blob for t in toks):
+            untracked.append(path)
+    if untracked:
+        # Go uses suite-style tests: F2P entries are function names (e.g. TestEvents)
+        # that act as suite entrypoints, while added *_test.go files hold specs that
+        # run UNDER them via `go test ./pkg/...` — so a new file whose name isn't in
+        # F2P is still executed and counted. Per-file untracking is therefore a false
+        # signal in Go (confirmed FP on the navidrome golden), unlike pytest where
+        # node-ID selection makes an untracked file genuinely unscored. Downgrade to
+        # WARN for Go; keep it a hard ERROR for pytest/JS-style frameworks.
+        lang = str((meta.get("language") or "")).lower()
+        sev = "WARN" if lang in ("go", "golang") else "ERROR"
+        r.add(sev, "testfile-untracked-in-metadata",
+              "test.patch adds new test file(s) not referenced by FAIL_TO_PASS/PASS_TO_PASS: "
+              + ", ".join(sorted(set(untracked))[:5])
+              + " — their tests run during eval but never count toward the score, so a "
+                "no-op/wrong solution can break them and still score 1.0. Append their "
+                "test identifiers to FAIL_TO_PASS in test_metadata.json (Alibaba Concern 2)."
+              + (" [Go suite-style: downgraded to WARN — go test runs the whole package "
+                 "under the tracked suite entrypoint.]" if sev == "WARN" else ""))
+
+
+# --------------------------------------------------------------------------- #
 # Environment-hygiene checks (deterministic; derived from client failures).
 # Each maps to a real defect in swe-bench-ext-client-feedback.md.
 # --------------------------------------------------------------------------- #
@@ -422,6 +594,105 @@ def check_env_hygiene(task_dir: Path, r: TaskReport) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Delivery-hygiene checks (metadata fidelity / packaging readability).
+# These tasks build, pass golden, and don't leak — they're just mislabeled,
+# dirty, or unreadable. All WARN (FAIL only under --strict). Derived from
+# client feedback on fingerprintjs / atdatabases / ibm-fhir.
+# --------------------------------------------------------------------------- #
+
+def check_test_framework_consistency(task_dir: Path, meta: dict[str, Any] | None,
+                                     r: TaskReport) -> None:
+    """Flag a declared test_framework that contradicts the test_command / language.
+
+    Catches the 'wrong field' defect (e.g. test_framework="pytest" on a TypeScript
+    project whose test_command runs karma). check_metadata only verifies the key is
+    present — it never reads the value, so the mislabel sails through.
+    """
+    if meta is None:
+        return
+    declared = str(meta.get("test_framework", "")).strip().lower()
+    if declared not in FRAMEWORK_SIGNATURES:
+        return  # absent, blank, or a custom framework we can't reason about
+    expected_tokens, declared_family = FRAMEWORK_SIGNATURES[declared]
+
+    # (a) test_command clearly runs a *different* known framework.
+    tc = str(meta.get("test_command", "")).lower()
+    if tc and not any(tok in tc for tok in expected_tokens):
+        detected = [
+            name for name, (tokens, _) in FRAMEWORK_SIGNATURES.items()
+            if name != declared and any(tok in tc for tok in tokens)
+        ]
+        if detected:
+            r.add("WARN", "test-framework-mismatch",
+                  f"test_framework=`{declared}` but test_command runs `{detected[0]}` "
+                  "— the framework field looks wrong")
+            return  # one clear signal is enough; don't double-report
+
+    # (b) declared framework's language conflicts with the `language` field.
+    lang = str(meta.get("language", "")).strip().lower()
+    lang_family = LANGUAGE_FAMILY.get(lang)
+    if lang_family and lang_family != declared_family:
+        r.add("WARN", "test-framework-mismatch",
+              f"test_framework=`{declared}` ({declared_family}) contradicts "
+              f"language=`{lang}` ({lang_family}) — the framework field looks wrong")
+
+
+def check_test_name_readability(task_dir: Path, meta: dict[str, Any] | None,
+                                r: TaskReport) -> None:
+    """Flag FAIL_TO_PASS entries with anonymized, non-descriptive names.
+
+    Client defect (ibm-fhir): all 54 FAIL_TO_PASS entries were `test_1` … `test_54`,
+    untraceable to requirements.json or the real test methods. The list/mapping checks
+    in check_metadata pass on these — the names just aren't useful.
+    """
+    if meta is None:
+        return
+    # Suppress for count-summary frameworks (Maven Surefire / Bun / mocha): there the
+    # parser legitimately synthesizes `test_N` and Alibaba confirmed it grades correctly
+    # — flagging it would re-raise a finding the client already rejected as a non-defect.
+    fw = str(meta.get("test_framework", "")).strip().lower()
+    if fw in COUNT_SUMMARY_FRAMEWORKS:
+        return
+    f2p = meta.get("FAIL_TO_PASS")
+    if not isinstance(f2p, list) or not f2p:
+        return
+    anon = [str(e) for e in f2p if ANON_TEST_RE.match(str(e).split("::")[-1].strip())]
+    total = len(f2p)
+    # A single oddly-named test is noise; a wall of test_N is a real defect.
+    if anon and (len(anon) >= 5 or len(anon) >= total / 2):
+        sample = ", ".join(e.split("::")[-1].strip() for e in anon[:3])
+        r.add("WARN", "anonymized-test-names",
+              f"{len(anon)}/{total} FAIL_TO_PASS entries use anonymized names "
+              f"(e.g. {sample}) — not traceable to requirements.json or real test "
+              "methods; use the real test identifiers")
+
+
+def check_pipeline_tags(task_dir: Path, r: TaskReport) -> None:
+    """Flag leftover internal automation/pipeline identifiers in shipped files.
+
+    Client defect (atdatabases): the Dockerfile carried `# MAI-10K-OTS` and
+    `# MAI-V5-FIX:FIX2` comments — automation residue that also cast doubt on whether
+    the image was manually verified. These should be stripped before delivery.
+    """
+    for name in TAG_SCAN_FILES:
+        p = task_dir / name
+        if not p.is_file():
+            continue
+        tags: list[str] = []
+        for line in _read_text(p).splitlines():
+            if "#" not in line:
+                continue
+            comment = line.split("#", 1)[1]  # only scan the comment portion
+            tags.extend(m.group(0) for m in PIPELINE_TAG_RE.finditer(comment))
+        if tags:
+            uniq = sorted(set(tags))
+            r.add("WARN", "pipeline-tag-comment",
+                  f"`{name}` has leftover automation/pipeline identifier(s) in comments: "
+                  f"{', '.join(uniq[:5])} — strip before delivery (and confirm the image "
+                  "wasn't left in an auto-patched, unverified state)")
+
+
+# --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
 
@@ -434,8 +705,12 @@ def check_task(task_dir: Path) -> TaskReport:
     check_prompt(task_dir, r)
     meta = check_metadata(task_dir, r)
     check_cross_consistency(task_dir, meta, r)
+    check_untracked_test_files(task_dir, meta, r)
+    check_test_framework_consistency(task_dir, meta, r)
+    check_test_name_readability(task_dir, meta, r)
     check_line_endings(task_dir, r)
     check_leak_and_mounts(task_dir, r)
+    check_pipeline_tags(task_dir, r)
     check_env_hygiene(task_dir, r)
     return r
 
